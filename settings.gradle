@@ -1,0 +1,2 @@
+include ':app'
+rootProject.name = "VoiceFilter_inference_2"

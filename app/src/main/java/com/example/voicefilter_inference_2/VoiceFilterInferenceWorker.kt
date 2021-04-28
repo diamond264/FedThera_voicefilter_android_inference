@@ -1,11 +1,15 @@
 package com.example.voicefilter_inference_2
 
-import android.os.Bundle
+import android.app.NotificationManager
+import android.content.Context
+import android.os.Build
 import android.util.Log
-import androidx.appcompat.app.AppCompatActivity
-import androidx.work.OneTimeWorkRequestBuilder
+import androidx.annotation.RequiresApi
+import androidx.core.app.NotificationCompat
+import androidx.work.CoroutineWorker
+import androidx.work.ForegroundInfo
 import androidx.work.WorkManager
-import androidx.work.WorkRequest
+import androidx.work.WorkerParameters
 import org.jtransforms.fft.DoubleFFT_1D
 import org.pytorch.IValue
 import org.pytorch.Module
@@ -21,9 +25,14 @@ import kotlin.math.log10
 import kotlin.math.pow
 import kotlin.math.sqrt
 
+class VoiceFilterInferenceWorker(context: Context, parameters: WorkerParameters) :
+        CoroutineWorker(context, parameters) {
 
-class MainActivity : AppCompatActivity() {
+//    private val notificationManager =
+//            context.getSystemService(Context.NOTIFICATION_SERVICE) as
+//                    NotificationManager
     val TAG: String = "VOICEFILTER_log"
+    val ctx = context
 
     fun parse_mel_file(path: String): Array<DoubleArray> {
         val file = File(path)
@@ -51,7 +60,7 @@ class MainActivity : AppCompatActivity() {
         // Creating 'hanning' window
         var window = DoubleArray(n_fft) { 0.0 }
         for (i in 0..win_length-1) window[i+(n_fft-win_length)/2] =
-            0.5 - 0.5 * Math.cos(2 * Math.PI * i / (win_length))
+                0.5 - 0.5 * Math.cos(2 * Math.PI * i / (win_length))
 
         var padded_sig = DoubleArray(sig.size + n_fft) { 0.0 }
         for (i in padded_sig.indices) {
@@ -100,7 +109,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        val mel_basis_file = File(this.getExternalFilesDir(null), "mel_basis.csv")
+        val mel_basis_file = File(ctx.getExternalFilesDir(null), "mel_basis.csv")
         val mel_basis = parse_mel_file(mel_basis_file.toString()) // 40 x 257
 
         var mel = FloatArray(magnitudes.size * mel_basis.size) { 0.0F }
@@ -169,9 +178,19 @@ class MainActivity : AppCompatActivity() {
         return Pair(S, D)
     }
 
-    fun load_audio(filename: String): DoubleArray{
+    override suspend fun doWork(): Result {
+        inference()
+        return Result.success()
+    }
+
+    private fun inference() {
+        val dvec_model_file = File(ctx.getExternalFilesDir(null), "embedder_test3.pt")
+        val vf_model_file: File = File(ctx.getExternalFilesDir(null), "vf_lighten_test3.pt")
+        val dvec_module = Module.load(dvec_model_file.toString())
+        val vf_module = Module.load(vf_model_file.toString())
+
         // Reading audio from .wav file
-        var audioIS = FileInputStream(File(this.getExternalFilesDir(null), filename))
+        var audioIS = FileInputStream(File(ctx.getExternalFilesDir(null), "test.wav"))
         val audioBytes = ByteArrayOutputStream()
         while (audioIS.available() > 0) {
             audioBytes.write(audioIS.read())
@@ -184,7 +203,7 @@ class MainActivity : AppCompatActivity() {
         Log.d(TAG, "samples:")
         audioL16Samples = audioL16Samples.slice(22..(audioL16Samples.size-1)).toShortArray() // for wav
 
-//        // Processing mono audio
+        // Processing mono audio
 //        val monoSamples = ShortArray(audioL16Samples.size / 2)
 //        for (i in monoSamples.indices) {
 //            monoSamples[i] =
@@ -194,42 +213,18 @@ class MainActivity : AppCompatActivity() {
 //        Log.d(TAG, audioL16Samples[0].toString())
 
         // Now it has the same result with python librosa.load
-        return audioL16Samples.map{(it/32768.0).toDouble()}.toDoubleArray()
-    }
+        var audio_raw = audioL16Samples.map{(it/32768.0).toDouble()}.toDoubleArray()
 
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        setContentView(R.layout.activity_main)
-        Log.d(TAG, "onCreate")
-
-//        val inferenceRequest: WorkRequest =
-//            OneTimeWorkRequestBuilder<VoiceFilterInferenceWorker>()
-//                .build()
-//
-//        WorkManager.getInstance(this).enqueue(inferenceRequest)
-
-        // Importing pytorch model files
-        val dvec_model_file = File(this.getExternalFilesDir(null), "embedder_test3.pt")
-        val vf_model_file: File = File(this.getExternalFilesDir(null), "vf_lighten_test3.pt")
-        val dvec_module = Module.load(dvec_model_file.toString())
-        val vf_module = Module.load(vf_model_file.toString())
-
-        // audio array
-        var audio_raw = load_audio("test.wav")
-
-        // dvec input
         val dvec_mel = get_mel(audio_raw, 16000, 40, 512, 160, 400)
         val dvec_shape = arrayOf<Long>(40, (dvec_mel.size/40).toLong()).toLongArray()
 
         val start_time = System.currentTimeMillis()
         val dvec_tensor = Tensor.fromBlob(dvec_mel, dvec_shape)
         val dvec_inp = IValue.from(dvec_tensor)
-        // dvec inference
         val dvec_out = dvec_module.forward(dvec_inp).toTensor().dataAsFloatArray
         Log.d(TAG, (System.currentTimeMillis()-start_time).toString())
 
         val spec = wav2spec(audio_raw, 1200, 160, 400)
-        // voicefilter input
         val mag = spec.first
         val phase = spec.second
 
@@ -244,9 +239,12 @@ class MainActivity : AppCompatActivity() {
         val vf_dvec_shape = arrayOf<Long>(1, 256).toLongArray()
         val vf_dvec_tensor = Tensor.fromBlob(dvec_out, vf_dvec_shape)
         val vf_dvec_inp = IValue.from(vf_dvec_tensor)
-        val start_time2 = System.currentTimeMillis()
-        // voicefilter inference
         val vf_out = vf_module.forward(mag_inp, vf_dvec_inp)
-        Log.d(TAG, (System.currentTimeMillis()-start_time2).toString())
+        Log.d(TAG, vf_out.toStr())
+    }
+
+    @RequiresApi(Build.VERSION_CODES.O)
+    private fun createChannel() {
+        // Create a Notification channel
     }
 }

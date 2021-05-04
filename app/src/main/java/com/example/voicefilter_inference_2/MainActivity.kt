@@ -85,8 +85,97 @@ class MainActivity : AppCompatActivity() {
                 stft_result_i[i][k] = a[2 * k + 1] //Im
             }
         }
+        Double
 
         return Pair(stft_result_r, stft_result_i)
+    }
+
+    fun imaginary_exp(phase: Array<DoubleArray>): Pair<Array<DoubleArray>, Array<DoubleArray>> {
+        var exp_result_r = Array(phase.size) { DoubleArray(phase[0].size) { 0.0 } }
+        var exp_result_i = Array(phase.size) { DoubleArray(phase[0].size) { 0.0 } }
+        for (i in 0 until phase.size) {
+            for (j in 0 until phase[i].size) {
+                exp_result_r[i][j] = Math.cos(phase[i][j])
+                exp_result_i[i][j] = Math.sin(phase[i][j])
+            }
+        }
+        return Pair(exp_result_r, exp_result_i)
+    }
+
+    fun ISTFT(mag: Array<DoubleArray>, phase: Array<DoubleArray>): DoubleArray {
+        val hop_length = 160
+        val win_length = 400
+
+        val exp_res = imaginary_exp(phase)
+        val exp_r = exp_res.first
+        val exp_i = exp_res.second
+
+        var stft_matrix_r = Array(mag.size) { DoubleArray(mag[0].size) { 0.0 } }
+        var stft_matrix_i = Array(mag.size) { DoubleArray(mag[0].size) { 0.0 } }
+
+        for (i in 0 until stft_matrix_r.size) {
+            for (j in 0 until stft_matrix_r[i].size) {
+                stft_matrix_r[i][j] = mag[i][j] * exp_r[i][j]
+                stft_matrix_i[i][j] = mag[i][j] * exp_i[i][j]
+            }
+        }
+
+        val n_fft = 2 * (stft_matrix_r.size - 1)
+
+        // Creating 'hanning' window
+        var window = DoubleArray(n_fft) { 0.0 }
+        for (i in 0..win_length-1) window[i+(n_fft-win_length)/2] =
+                0.5 - 0.5 * Math.cos(2 * Math.PI * i / (win_length))
+
+        val n_frames = stft_matrix_r[0].size
+        val expected_signal_len = n_fft + hop_length * (n_frames - 1)
+        var y = DoubleArray(expected_signal_len) { 0.0 }
+
+        for (i in 0 until n_frames) {
+            var sample = i * hop_length
+            transpose_()
+        }
+
+        for i in range(n_frames):
+        sample = i * hop_length
+        spec = stft_matrix[:, i].flatten()
+        spec = np.concatenate((spec, spec[-2:0:-1].conj()), 0)
+        ytmp = ifft_window * fft.ifft(spec).real
+
+        y[sample:(sample + n_fft)] = y[sample:(sample + n_fft)] + ytmp
+
+        # Normalize by sum of squared window
+                ifft_window_sum = window_sumsquare(window,
+                n_frames,
+                win_length=win_length,
+                n_fft=n_fft,
+                hop_length=hop_length,
+                dtype=dtype)
+
+        approx_nonzero_indices = ifft_window_sum > util.tiny(ifft_window_sum)
+        y[approx_nonzero_indices] /= ifft_window_sum[approx_nonzero_indices]
+
+        if length is None:
+        # If we don't need to control length, just do the usual center trimming
+        # to eliminate padded data
+                if center:
+        y = y[(n_fft/2)]
+        :-(n_fft/2)]
+
+
+
+
+
+
+        Log.d(TAG, "r")
+        Log.d(TAG, stft_matrix_r[1][1].toString())
+        Log.d(TAG, stft_matrix_r[1][2].toString())
+        Log.d(TAG, "i")
+        Log.d(TAG, stft_matrix_i[1][1].toString())
+        Log.d(TAG, stft_matrix_i[1][2].toString())
+
+        var return_arr = DoubleArray(3) { 0.0 }
+        return return_arr
     }
 
     fun get_mel(sig: DoubleArray, sr: Int, n_mels: Int, n_fft: Int, hop_length: Int, win_length: Int): FloatArray {
@@ -181,7 +270,6 @@ class MainActivity : AppCompatActivity() {
         ByteBuffer.wrap(tmpBytes).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(audioL16Samples)
         audioIS.close()
 
-        Log.d(TAG, "samples:")
         audioL16Samples = audioL16Samples.slice(22..(audioL16Samples.size-1)).toShortArray() // for wav
 
 //        // Processing mono audio
@@ -197,6 +285,65 @@ class MainActivity : AppCompatActivity() {
         return audioL16Samples.map{(it/32768.0).toDouble()}.toDoubleArray()
     }
 
+    fun generate_est_mag(mask: FloatArray, mag: Array<DoubleArray>): Array<DoubleArray> {
+        var return_arr = Array(mag.size) { DoubleArray(mag[0].size) { 0.0 } }
+        for (i in 0 until return_arr.size) {
+            for (j in 0 until return_arr[i].size) {
+                return_arr[i][j] = mag[i][j] * mask[i*(return_arr[i].size)+j]
+            }
+        }
+        return return_arr
+    }
+
+    fun transpose_(mtx: Array<DoubleArray>): Array<DoubleArray> {
+        var transposed_mtx = Array(mtx[0].size) { DoubleArray(mtx.size) { 0.0 } }
+        for (i in 0 until transposed_mtx.size) {
+            for (j in 0 until transposed_mtx[i].size) {
+                transposed_mtx[i][j] = mtx[j][i]
+            }
+        }
+        return transposed_mtx
+    }
+
+    fun denormalize(spectrogram: Array<DoubleArray>): Array<DoubleArray> {
+        val min_level_db = -100.0
+        val ref_level_db = 20.0
+        var return_arr = Array(spectrogram.size) { DoubleArray(spectrogram[0].size) { 0.0 } }
+        for (i in 0 until spectrogram.size) {
+            for (j in 0 until spectrogram[i].size) {
+                var ret_val = 0.0
+                if (spectrogram[i][j] > 1.0) ret_val = 1.0
+                else if (spectrogram[i][j] > 0.0) ret_val = spectrogram[i][j]
+                ret_val = ret_val - 1.0
+                ret_val = ret_val * (-min_level_db)
+                ret_val = ret_val + ref_level_db
+                return_arr[i][j] = ret_val
+            }
+        }
+        return return_arr
+    }
+
+    fun db_to_amp(spectrogram: Array<DoubleArray>): Array<DoubleArray> {
+        var return_arr = Array(spectrogram.size) { DoubleArray(spectrogram[0].size) { 0.0 } }
+        for (i in 0 until spectrogram.size) {
+            for (j in 0 until spectrogram[i].size) {
+                return_arr[i][j] = 10.0.pow(spectrogram[i][j] * 0.05)
+            }
+        }
+        return return_arr
+    }
+
+    fun spec2wav(est_mag: Array<DoubleArray>, phase_: Array<DoubleArray>): DoubleArray {
+        val spectrogram = transpose_(est_mag)
+        val phase = transpose_(phase_)
+
+        val denomalized_spec = denormalize(spectrogram)
+        val S = db_to_amp(denomalized_spec)
+
+        val return_arr = ISTFT(S, phase)
+        return return_arr
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
@@ -207,6 +354,15 @@ class MainActivity : AppCompatActivity() {
 //                .build()
 //
 //        WorkManager.getInstance(this).enqueue(inferenceRequest)
+
+        /*
+        TODO:
+        - Model downloading implementation
+        - Compressing model more
+        - MNN compatibility?
+        - Combining ASR model
+         */
+
 
         // Importing pytorch model files
         val dvec_model_file = File(this.getExternalFilesDir(null), "embedder_test3.pt")
@@ -246,7 +402,9 @@ class MainActivity : AppCompatActivity() {
         val vf_dvec_inp = IValue.from(vf_dvec_tensor)
         val start_time2 = System.currentTimeMillis()
         // voicefilter inference
-        val vf_out = vf_module.forward(mag_inp, vf_dvec_inp)
-        Log.d(TAG, (System.currentTimeMillis()-start_time2).toString())
+        val vf_out = vf_module.forward(mag_inp, vf_dvec_inp).toTensor().dataAsFloatArray
+
+        val est_mag = generate_est_mag(vf_out, mag)
+        val est_wav = spec2wav(est_mag, phase)
     }
 }

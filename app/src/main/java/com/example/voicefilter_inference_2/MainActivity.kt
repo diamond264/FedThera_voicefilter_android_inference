@@ -85,7 +85,6 @@ class MainActivity : AppCompatActivity() {
                 stft_result_i[i][k] = a[2 * k + 1] //Im
             }
         }
-        Double
 
         return Pair(stft_result_r, stft_result_i)
     }
@@ -110,71 +109,77 @@ class MainActivity : AppCompatActivity() {
         val exp_r = exp_res.first
         val exp_i = exp_res.second
 
-        var stft_matrix_r = Array(mag.size) { DoubleArray(mag[0].size) { 0.0 } }
-        var stft_matrix_i = Array(mag.size) { DoubleArray(mag[0].size) { 0.0 } }
+        var spec_r = Array(mag[0].size) { DoubleArray(mag.size*2-2) { 0.0 } }
+        var spec_i = Array(mag[0].size) { DoubleArray(mag.size*2-2) { 0.0 } }
 
-        for (i in 0 until stft_matrix_r.size) {
-            for (j in 0 until stft_matrix_r[i].size) {
-                stft_matrix_r[i][j] = mag[i][j] * exp_r[i][j]
-                stft_matrix_i[i][j] = mag[i][j] * exp_i[i][j]
+        for (i in 0 until mag.size) {
+            for (j in 0 until mag[i].size) {
+                spec_r[j][i] = mag[i][j] * exp_r[i][j]
+                spec_i[j][i] = mag[i][j] * exp_i[i][j]
+
+                if (i != 0 && i != mag.size-1) {
+                    spec_r[j][spec_r[j].size-i] = spec_r[j][i]
+                    spec_i[j][spec_i[j].size-i] = -spec_i[j][i]
+                }
             }
         }
 
-        val n_fft = 2 * (stft_matrix_r.size - 1)
+        val n_fft = 2 * (mag.size - 1)
 
         // Creating 'hanning' window
         var window = DoubleArray(n_fft) { 0.0 }
         for (i in 0..win_length-1) window[i+(n_fft-win_length)/2] =
                 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (win_length))
 
-        val n_frames = stft_matrix_r[0].size
+        val n_frames = spec_r.size
         val expected_signal_len = n_fft + hop_length * (n_frames - 1)
         var y = DoubleArray(expected_signal_len) { 0.0 }
 
         for (i in 0 until n_frames) {
             var sample = i * hop_length
-            transpose_()
+            var ytmp = DoubleArray(window.size) { 0.0 }
+            var a = DoubleArray(2 * spec_r[i].size) //fft 수행할 배열 사이즈 2N
+            for (k in 0 until spec_r[i].size) {
+                a[2 * k] = spec_r[i][k] //Re
+                a[2 * k + 1] = spec_i[i][k] //Im
+            }
+
+            var fft_new = DoubleFFT_1D(spec_r[i].size.toLong())
+            fft_new.complexInverse(a, true)
+
+            for (k in 0 until spec_r[i].size) {
+                ytmp[k] = a[2 * k] * window[k] //Re * ifft_win
+            }
+
+            for (k in sample until sample+n_fft) {
+                y[k] = y[k] + ytmp[k-sample]
+            }
         }
 
-        for i in range(n_frames):
-        sample = i * hop_length
-        spec = stft_matrix[:, i].flatten()
-        spec = np.concatenate((spec, spec[-2:0:-1].conj()), 0)
-        ytmp = ifft_window * fft.ifft(spec).real
+        var ifft_window_sum = DoubleArray(expected_signal_len) { 0.0 }
+        var hann_window = DoubleArray(n_fft) { 0.0 }
+        for (i in 0 until win_length) {
+            hann_window[i+(n_fft-win_length)/2] = (0.5 - 0.5 * Math.cos(2 * Math.PI * i / (win_length))).pow(2)
+        }
 
-        y[sample:(sample + n_fft)] = y[sample:(sample + n_fft)] + ytmp
+        for (i in 0 until n_frames) {
+            var sample = i * hop_length
+            for (j in sample until Math.min(ifft_window_sum.size, sample+n_fft)) {
+                ifft_window_sum[j] = ifft_window_sum[j] + hann_window[j-sample]
+            }
+        }
 
-        # Normalize by sum of squared window
-                ifft_window_sum = window_sumsquare(window,
-                n_frames,
-                win_length=win_length,
-                n_fft=n_fft,
-                hop_length=hop_length,
-                dtype=dtype)
+        for (i in 0 until expected_signal_len) {
+            if (ifft_window_sum[i] > 1.1754944e-38) {
+                y[i] = y[i] / ifft_window_sum[i]
+            }
+        }
 
-        approx_nonzero_indices = ifft_window_sum > util.tiny(ifft_window_sum)
-        y[approx_nonzero_indices] /= ifft_window_sum[approx_nonzero_indices]
+        var return_arr = DoubleArray(y.size-n_fft) { 0.0 }
+        for (i in 0 until return_arr.size) {
+            return_arr[i] = y[i+n_fft/2]
+        }
 
-        if length is None:
-        # If we don't need to control length, just do the usual center trimming
-        # to eliminate padded data
-                if center:
-        y = y[(n_fft/2)]
-        :-(n_fft/2)]
-
-
-
-
-
-
-        Log.d(TAG, "r")
-        Log.d(TAG, stft_matrix_r[1][1].toString())
-        Log.d(TAG, stft_matrix_r[1][2].toString())
-        Log.d(TAG, "i")
-        Log.d(TAG, stft_matrix_i[1][1].toString())
-        Log.d(TAG, stft_matrix_i[1][2].toString())
-
-        var return_arr = DoubleArray(3) { 0.0 }
         return return_arr
     }
 
@@ -371,19 +376,24 @@ class MainActivity : AppCompatActivity() {
         val vf_module = Module.load(vf_model_file.toString())
 
         // audio array
+        var start_time = System.currentTimeMillis()
         var audio_raw = load_audio("test.wav")
+        Log.d(TAG, "audio loading time "+(System.currentTimeMillis()-start_time).toString())
 
         // dvec input
+        start_time = System.currentTimeMillis()
         val dvec_mel = get_mel(audio_raw, 16000, 40, 512, 160, 400)
         val dvec_shape = arrayOf<Long>(40, (dvec_mel.size/40).toLong()).toLongArray()
 
-        val start_time = System.currentTimeMillis()
         val dvec_tensor = Tensor.fromBlob(dvec_mel, dvec_shape)
         val dvec_inp = IValue.from(dvec_tensor)
+        Log.d(TAG, "dvec preprocessing time "+(System.currentTimeMillis()-start_time).toString())
         // dvec inference
+        start_time = System.currentTimeMillis()
         val dvec_out = dvec_module.forward(dvec_inp).toTensor().dataAsFloatArray
-        Log.d(TAG, (System.currentTimeMillis()-start_time).toString())
+        Log.d(TAG, "dvec inference time "+(System.currentTimeMillis()-start_time).toString())
 
+        start_time = System.currentTimeMillis()
         val spec = wav2spec(audio_raw, 1200, 160, 400)
         // voicefilter input
         val mag = spec.first
@@ -400,11 +410,16 @@ class MainActivity : AppCompatActivity() {
         val vf_dvec_shape = arrayOf<Long>(1, 256).toLongArray()
         val vf_dvec_tensor = Tensor.fromBlob(dvec_out, vf_dvec_shape)
         val vf_dvec_inp = IValue.from(vf_dvec_tensor)
+        Log.d(TAG, "voicefilter preprocessing time "+(System.currentTimeMillis()-start_time).toString())
         val start_time2 = System.currentTimeMillis()
         // voicefilter inference
+        start_time = System.currentTimeMillis()
         val vf_out = vf_module.forward(mag_inp, vf_dvec_inp).toTensor().dataAsFloatArray
+        Log.d(TAG, "voicefilter inference time "+(System.currentTimeMillis()-start_time).toString())
 
+        start_time = System.currentTimeMillis()
         val est_mag = generate_est_mag(vf_out, mag)
         val est_wav = spec2wav(est_mag, phase)
+        Log.d(TAG, "wav recovery time "+(System.currentTimeMillis()-start_time).toString())
     }
 }

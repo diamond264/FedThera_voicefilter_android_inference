@@ -1,21 +1,22 @@
 package com.example.voicefilter_inference_2
 
+import android.app.Activity
 import android.os.Bundle
 import android.util.Log
 import androidx.appcompat.app.AppCompatActivity
-import androidx.work.OneTimeWorkRequestBuilder
-import androidx.work.WorkManager
-import androidx.work.WorkRequest
 import org.jtransforms.fft.DoubleFFT_1D
 import org.pytorch.IValue
 import org.pytorch.Module
 import org.pytorch.Tensor
+import org.tensorflow.lite.Interpreter
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileNotFoundException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.nio.MappedByteBuffer
+import java.nio.channels.FileChannel
 import java.util.*
 import kotlin.math.log10
 import kotlin.math.pow
@@ -421,5 +422,18 @@ class MainActivity : AppCompatActivity() {
         val est_mag = generate_est_mag(vf_out, mag)
         val est_wav = spec2wav(est_mag, phase)
         Log.d(TAG, "wav recovery time "+(System.currentTimeMillis()-start_time).toString())
+
+        val tflite_file = File(this.getExternalFilesDir(null), "subword-conformer.latest.tflite")
+        val interpreter = Interpreter(tflite_file)
+        val input_idx = interpreter.getInputIndex("signal")
+
+        var output_arr = IntArray(est_wav.size) { 0 }
+        interpreter.resizeInput(input_idx, IntArray(1) {est_wav.size})
+        interpreter.allocateTensors()
+
+        val a: TensorBuffer = TensorBuffer()
+
+        interpreter.run(est_wav.buffer, output_arr)
+        Log.d(TAG, "result "+output_arr[4])
     }
 }

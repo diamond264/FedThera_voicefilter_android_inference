@@ -1,0 +1,2 @@
+org/kaldi/models/BuildConfig.java
+ org.kaldi.models.BuildConfig

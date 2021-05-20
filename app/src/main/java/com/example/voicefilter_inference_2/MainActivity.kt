@@ -1,22 +1,22 @@
 package com.example.voicefilter_inference_2
 
-import android.app.Activity
 import android.os.Bundle
 import android.util.Log
 import androidx.appcompat.app.AppCompatActivity
+import org.jtransforms.dct.DoubleDCT_1D
+import org.jtransforms.dct.DoubleDCT_2D
 import org.jtransforms.fft.DoubleFFT_1D
 import org.pytorch.IValue
 import org.pytorch.Module
 import org.pytorch.Tensor
-import org.tensorflow.lite.Interpreter
+import org.vosk.Model
+import org.vosk.Recognizer
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileNotFoundException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import java.nio.MappedByteBuffer
-import java.nio.channels.FileChannel
 import java.util.*
 import kotlin.math.log10
 import kotlin.math.pow
@@ -212,6 +212,91 @@ class MainActivity : AppCompatActivity() {
         return mel
     }
 
+    fun get_melspectrogram(sig: DoubleArray, sr: Int, n_mels: Int, n_fft: Int, hop_length: Int, win_length: Int): Array<DoubleArray> {
+        val stft_result = STFT(sig, n_fft, hop_length, win_length)
+        val stft_r = stft_result.first
+        val stft_i = stft_result.second
+        var magnitudes = Array(stft_r.size) { DoubleArray(stft_r[0].size) { 0.0 } }
+        for (i in 0 until stft_r.size) { // sec
+            for (j in 0 until stft_r[0].size) {
+                magnitudes[i][j] = stft_r[i][j].pow(2) + stft_i[i][j].pow(2)
+            }
+        }
+
+        val mel_basis_file = File(this.getExternalFilesDir(null), "mel_basis.csv")
+        val mel_basis = parse_mel_file(mel_basis_file.toString()) // 40 x 257
+
+        var mel = Array(magnitudes.size) { DoubleArray (mel_basis.size) { 0.0 } }
+        for (i in 0 until magnitudes.size) { // sec
+            for (j in 0 until mel_basis.size) { // n_mels (40)
+                var sum = 0.0
+                for (k in 0 until magnitudes[i].size) { // n_fft/2 + 1
+                    sum += magnitudes[i][k] * mel_basis[j][k]
+                }
+                mel[i][j] = 10*log10(sum+1e-6)
+            }
+        }
+
+        return mel
+    }
+
+    fun get_MFCC(sig: DoubleArray, sr: Int, n_mels: Int, n_fft: Int, hop_length: Int, win_length: Int): Array<DoubleArray> {
+        val log_mel = get_melspectrogram(sig, sr, n_mels, n_fft, hop_length, win_length)
+
+        var mfcc = Array(log_mel[0].size) { DoubleArray(log_mel.size) {0.0} }
+        for (i in 0 until log_mel.size) {
+            val dct = DoubleDCT_1D(log_mel[i].size.toLong())
+            var a = log_mel[i].clone()
+            dct.forward(a, true)
+            for (j in 0 until a.size) {
+                mfcc[j][i] = a[j]
+            }
+        }
+
+        return mfcc
+    }
+
+    fun get_waveform_features(sig: DoubleArray): DoubleArray {
+        // avg magnitude, magnitude variance, min magnitude, max magnitude, zero crossing rate
+        var positive = false
+        if (sig[0] > 0) positive = true
+
+        var min_val = Double.MAX_VALUE
+        var max_val = Double.MIN_VALUE
+
+        var zero_crossing = 0.0
+        var mean_val = 0.0
+        for (i in 0 until sig.size) {
+            var abs_val = sig[i]
+            if (sig[i] < 0) abs_val = -abs_val
+            if (positive && sig[i] < 0) {
+                positive = false
+                zero_crossing += 1
+            }
+            else if (!positive && sig[i] > 0) {
+                positive = true
+                zero_crossing += 1
+            }
+
+            if (min_val > abs_val) min_val = abs_val
+            if (max_val < abs_val) max_val = abs_val
+            mean_val += abs_val
+        }
+        val zero_crossing_rate = zero_crossing / sig.size
+        mean_val = mean_val / sig.size
+
+        var var_val = 0.0
+        for (i in 0 until sig.size) {
+            var abs_val = sig[i]
+            if (sig[i] < 0) abs_val = -abs_val
+
+            var_val += (abs_val-mean_val).pow(2)
+        }
+        var_val = var_val / sig.size
+
+        return doubleArrayOf(mean_val, var_val, min_val, max_val, zero_crossing_rate)
+    }
+
     fun amp_to_db(stft_r: Array<DoubleArray>, stft_i: Array<DoubleArray>): Array<DoubleArray> {
         val ref_level_db = 20.0
         var stft_abs = Array(stft_r.size) { DoubleArray(stft_r[0].size) { 0.0 } }
@@ -291,6 +376,10 @@ class MainActivity : AppCompatActivity() {
         return audioL16Samples.map{(it/32768.0).toDouble()}.toDoubleArray()
     }
 
+    fun decode_audio(audio: DoubleArray): ShortArray {
+        return audio.map{(it*32768).toShort()}.toShortArray()
+    }
+
     fun generate_est_mag(mask: FloatArray, mag: Array<DoubleArray>): Array<DoubleArray> {
         var return_arr = Array(mag.size) { DoubleArray(mag[0].size) { 0.0 } }
         for (i in 0 until return_arr.size) {
@@ -368,72 +457,95 @@ class MainActivity : AppCompatActivity() {
         - MNN compatibility?
         - Combining ASR model
          */
-
-
-        // Importing pytorch model files
-        val dvec_model_file = File(this.getExternalFilesDir(null), "embedder_test3.pt")
-        val vf_model_file: File = File(this.getExternalFilesDir(null), "vf_lighten_test3.pt")
-        val dvec_module = Module.load(dvec_model_file.toString())
-        val vf_module = Module.load(vf_model_file.toString())
-
-        // audio array
-        var start_time = System.currentTimeMillis()
         var audio_raw = load_audio("test.wav")
-        Log.d(TAG, "audio loading time "+(System.currentTimeMillis()-start_time).toString())
+        var feature_arr = get_waveform_features(audio_raw)
+        var mfcc_res = get_MFCC(audio_raw, 16000, 40, 512, 160, 400)
 
-        // dvec input
-        start_time = System.currentTimeMillis()
-        val dvec_mel = get_mel(audio_raw, 16000, 40, 512, 160, 400)
-        val dvec_shape = arrayOf<Long>(40, (dvec_mel.size/40).toLong()).toLongArray()
-
-        val dvec_tensor = Tensor.fromBlob(dvec_mel, dvec_shape)
-        val dvec_inp = IValue.from(dvec_tensor)
-        Log.d(TAG, "dvec preprocessing time "+(System.currentTimeMillis()-start_time).toString())
-        // dvec inference
-        start_time = System.currentTimeMillis()
-        val dvec_out = dvec_module.forward(dvec_inp).toTensor().dataAsFloatArray
-        Log.d(TAG, "dvec inference time "+(System.currentTimeMillis()-start_time).toString())
-
-        start_time = System.currentTimeMillis()
-        val spec = wav2spec(audio_raw, 1200, 160, 400)
-        // voicefilter input
-        val mag = spec.first
-        val phase = spec.second
-
-        var mag_flatten = FloatArray(mag.size*mag[0].size) {0.0F}
-        for (i in 0 until mag.size) {
-            for (j in 0 until mag[i].size) mag_flatten[i*mag[i].size+j] = mag[i][j].toFloat()
+        for (i in 0 until mfcc_res.size) {
+            Log.d("SAMPLE", ""+mfcc_res[i][5])
         }
-        val mag_shape = arrayOf<Long>(1, (mag_flatten.size/601).toLong(), 601).toLongArray()
-        val mag_tensor = Tensor.fromBlob(mag_flatten, mag_shape)
-        val mag_inp = IValue.from(mag_tensor)
 
-        val vf_dvec_shape = arrayOf<Long>(1, 256).toLongArray()
-        val vf_dvec_tensor = Tensor.fromBlob(dvec_out, vf_dvec_shape)
-        val vf_dvec_inp = IValue.from(vf_dvec_tensor)
-        Log.d(TAG, "voicefilter preprocessing time "+(System.currentTimeMillis()-start_time).toString())
-        val start_time2 = System.currentTimeMillis()
-        // voicefilter inference
-        start_time = System.currentTimeMillis()
-        val vf_out = vf_module.forward(mag_inp, vf_dvec_inp).toTensor().dataAsFloatArray
-        Log.d(TAG, "voicefilter inference time "+(System.currentTimeMillis()-start_time).toString())
+        for (i in 0 until feature_arr.size) {
+            Log.d("SAMPLE", ""+feature_arr[i])
+        }
 
-        start_time = System.currentTimeMillis()
-        val est_mag = generate_est_mag(vf_out, mag)
-        val est_wav = spec2wav(est_mag, phase)
-        Log.d(TAG, "wav recovery time "+(System.currentTimeMillis()-start_time).toString())
-
-        val tflite_file = File(this.getExternalFilesDir(null), "subword-conformer.latest.tflite")
-        val interpreter = Interpreter(tflite_file)
-        val input_idx = interpreter.getInputIndex("signal")
-
-        var output_arr = IntArray(est_wav.size) { 0 }
-        interpreter.resizeInput(input_idx, IntArray(1) {est_wav.size})
-        interpreter.allocateTensors()
-
-        val a: TensorBuffer = TensorBuffer()
-
-        interpreter.run(est_wav.buffer, output_arr)
-        Log.d(TAG, "result "+output_arr[4])
+//        // Importing pytorch model files
+//        val dvec_model_file = File(this.getExternalFilesDir(null), "embedder_test3.pt")
+//        val vf_model_file: File = File(this.getExternalFilesDir(null), "vf_lighten_test3.pt")
+//        val dvec_module = Module.load(dvec_model_file.toString())
+//        val vf_module = Module.load(vf_model_file.toString())
+//
+//        // audio array
+//        var start_time = System.currentTimeMillis()
+//        var audio_raw = load_audio("test.wav")
+//        Log.d(TAG, "audio loading time "+(System.currentTimeMillis()-start_time).toString())
+//
+//        // dvec input
+//        start_time = System.currentTimeMillis()
+//        val dvec_mel = get_mel(audio_raw, 16000, 40, 512, 160, 400)
+//        val dvec_shape = arrayOf<Long>(40, (dvec_mel.size/40).toLong()).toLongArray()
+//
+//        val dvec_tensor = Tensor.fromBlob(dvec_mel, dvec_shape)
+//        val dvec_inp = IValue.from(dvec_tensor)
+//        Log.d(TAG, "dvec preprocessing time "+(System.currentTimeMillis()-start_time).toString())
+//        // dvec inference
+//        start_time = System.currentTimeMillis()
+//        val dvec_out = dvec_module.forward(dvec_inp).toTensor().dataAsFloatArray
+//        Log.d(TAG, "dvec inference time "+(System.currentTimeMillis()-start_time).toString())
+//
+//        start_time = System.currentTimeMillis()
+//        val spec = wav2spec(audio_raw, 1200, 160, 400)
+//        // voicefilter input
+//        val mag = spec.first
+//        val phase = spec.second
+//
+//        var mag_flatten = FloatArray(mag.size*mag[0].size) {0.0F}
+//        for (i in 0 until mag.size) {
+//            for (j in 0 until mag[i].size) mag_flatten[i*mag[i].size+j] = mag[i][j].toFloat()
+//        }
+//        val mag_shape = arrayOf<Long>(1, (mag_flatten.size/601).toLong(), 601).toLongArray()
+//        val mag_tensor = Tensor.fromBlob(mag_flatten, mag_shape)
+//        val mag_inp = IValue.from(mag_tensor)
+//
+//        val vf_dvec_shape = arrayOf<Long>(1, 256).toLongArray()
+//        val vf_dvec_tensor = Tensor.fromBlob(dvec_out, vf_dvec_shape)
+//        val vf_dvec_inp = IValue.from(vf_dvec_tensor)
+//        Log.d(TAG, "voicefilter preprocessing time "+(System.currentTimeMillis()-start_time).toString())
+//        val start_time2 = System.currentTimeMillis()
+//        // voicefilter inference
+//        start_time = System.currentTimeMillis()
+//        val vf_out = vf_module.forward(mag_inp, vf_dvec_inp).toTensor().dataAsFloatArray
+//        Log.d(TAG, "voicefilter inference time "+(System.currentTimeMillis()-start_time).toString())
+//
+//        start_time = System.currentTimeMillis()
+//        val est_mag = generate_est_mag(vf_out, mag)
+//        val est_wav = spec2wav(est_mag, phase)
+//        Log.d(TAG, "wav recovery time "+(System.currentTimeMillis()-start_time).toString())
+//
+////        val tflite_file = File(this.getExternalFilesDir(null), "subword-conformer.latest.tflite")
+////        val interpreter = Interpreter(tflite_file)//, option)
+////        val input_idx = interpreter.getInputIndex("signal")
+//
+//        val vosk_model = Model(this.getExternalFilesDir(null).toString()+"/vosk-model-small-en-us-0.15")
+//        val rec = Recognizer(vosk_model, 16000.0f)
+//
+//        // need to convert est_wav to inputstream
+//        val result = StringBuilder()
+//        val decoded = decode_audio(est_wav)
+//        var b = ShortArray(4096)
+//        var cnt = 0
+//        while (cnt*4096 < decoded.size) {
+//            if ((cnt+1)*4096 >= decoded.size) b = decoded.slice(cnt*4096 until decoded.size-1).toShortArray()
+//            else b = decoded.slice(cnt*4096 until (cnt+1)*4096).toShortArray()
+//            if (rec.acceptWaveForm(b, 4096)) {
+//                result.append(rec.result)
+//            } else {
+//                result.append(rec.partialResult)
+//            }
+//            cnt = cnt+1
+//        }
+//        result.append(rec.finalResult)
+//
+//        Log.d(TAG, "final "+result)
     }
 }
